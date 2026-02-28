@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hand Gesture Lite - L&R Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; background: #000; color: white; font-family: sans-serif; overflow: hidden; touch-action: none; }
+        #game-container { position: relative; width: 100vw; height: 100dvh; }
+        
+        /* カメラ映像を表示せず、スケルトンのみを描画するキャンバス */
+        canvas { 
+            position: absolute; left: 0; top: 0; 
+            width: 100%; height: 100%; 
+            object-fit: cover; 
+            transform: scaleX(-1); 
+        }
+
+        #ui-layer { position: absolute; top: 20px; left: 20px; z-index: 20; pointer-events: none; text-shadow: 2px 2px 4px black; }
+        .stat { font-size: 24px; margin-bottom: 10px; font-weight: bold; color: #00ff00; }
+        
+        #question-image { 
+            position: absolute; top: 50%; left: 50%; 
+            transform: translate(-50%, -50%); 
+            max-width: 80vw; max-height: 60vh; 
+            z-index: 10; border-radius: 15px; 
+            border: 10px solid transparent;
+            transition: border-color 0.15s;
+        }
+
+        #message { 
+            position: absolute; bottom: 15%; left: 0; width: 100%;
+            font-size: 36px; color: #ffff00; text-align: center; 
+            z-index: 30; text-shadow: 3px 3px 0 #000; font-weight: bold;
+        }
+
+        #start-btn { 
+            position: absolute; top: 75%; left: 50%; 
+            transform: translate(-50%, -50%); 
+            padding: 20px 40px; font-size: 24px; 
+            cursor: pointer; pointer-events: auto; z-index: 35; 
+            border-radius: 50px; background: #00ff00; 
+            border: none; font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <video id="input_video" style="display:none" playsinline></video>
+    <canvas id="output_canvas"></canvas>
+    
+    <div id="ui-layer">
+        <div class="stat">Score: <span id="score">0</span></div>
+        <div class="stat">Time: <span id="timer">45</span></div>
+    </div>
+
+    <img id="question-image" src="0.jpg" alt="">
+    <div id="message">カメラ準備中...</div>
+    <button id="start-btn" onclick="startGameManual()">ゲーム開始</button>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    // パフォーマンス向上のため alpha: false を設定
+    const canvasCtx = canvasElement.getContext('2d', {alpha: false});
+    const scoreEl = document.getElementById('score'), timerEl = document.getElementById('timer');
+    const questionImageEl = document.getElementById('question-image');
+    const messageEl = document.getElementById('message');
+    const startBtn = document.getElementById('start-btn');
+
+    let score = 0, timeLeft = 45, gameStarted = false;
+    let currentTarget = { number: 0, hand: '' }, lastTarget = { number: 0, hand: '' };
+    let lastCorrectTime = 0, gameTimerInterval, isCameraReady = false;
+    let audioCtx = null;
+
+    // 軽量描画用の骨格パス
+    const CONNECTIONS = [
+        [0,1,2,3,4], [0,5,6,7,8], [9,10,11,12], [13,14,15,16], [17,18,19,20], [0,17], [5,9,13,17]
+    ];
+
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    function speak(text) {
+        if (!window.speechSynthesis) return;
+        window.speechSynthesis.cancel();
+        const uttr = new SpeechSynthesisUtterance(text);
+        uttr.lang = 'ja-JP';
+        window.speechSynthesis.speak(uttr);
+    }
+
+    function beep() {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.frequency.setValueAtTime(900, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function startGameManual() {
+        if (gameStarted || !isCameraReady) return;
+        initAudio();
+        startBtn.style.display = 'none';
+        messageEl.innerText = "";
+        score = 0; scoreEl.innerText = "0";
+        timeLeft = 45; timerEl.innerText = "45";
+        gameStarted = true;
+        nextQuestion();
+        speak("スタート");
+        
+        clearInterval(gameTimerInterval);
+        gameTimerInterval = setInterval(() => {
+            timeLeft--;
+            timerEl.innerText = timeLeft;
+            if (timeLeft <= 0) endGame();
+        }, 1000);
+    }
+
+    function nextQuestion() {
+        let n, h;
+        do {
+            n = Math.floor(Math.random() * 10) + 1;
+            h = Math.random() < 0.5 ? 'Right' : 'Left';
+        } while (n === lastTarget.number && h === lastTarget.hand);
+        currentTarget = { number: n, hand: h };
+        lastTarget = { ...currentTarget };
+        questionImageEl.src = `${n}${h === 'Left' ? 'b' : ''}.jpg`;
+    }
+
+    function endGame() {
+        gameStarted = false;
+        clearInterval(gameTimerInterval);
+        questionImageEl.src = "0.jpg";
+        messageEl.innerHTML = `終了！<br>スコア: ${score}点`;
+        speak(`${score}点です。`);
+        startBtn.style.display = 'block';
+        startBtn.innerText = "もう一度";
+    }
+
+    // 自前の軽量スケルトン描画
+    function drawSkeleton(landmarks) {
+        canvasCtx.strokeStyle = '#00FF00';
+        canvasCtx.lineWidth = 3;
+        const w = canvasElement.width, h = canvasElement.height;
+        for (const path of CONNECTIONS) {
+            canvasCtx.beginPath();
+            for (let i = 0; i < path.length; i++) {
+                const pt = landmarks[path[i]];
+                if (i === 0) canvasCtx.moveTo(pt.x * w, pt.y * h);
+                else canvasCtx.lineTo(pt.x * w, pt.y * h);
+            }
+            canvasCtx.stroke();
+        }
+    }
+
+    function onResults(results) {
+        if (!isCameraReady && results.multiHandLandmarks) {
+            isCameraReady = true;
+            messageEl.innerText = "手を挙げて開始！";
+            startBtn.style.display = 'block';
+        }
+
+        if (canvasElement.width !== window.innerWidth) {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        }
+
+        // 背景をカメラ映像ではなく「黒」で塗りつぶす（大幅な軽量化）
+        canvasCtx.fillStyle = '#000';
+        canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.multiHandLandmarks) {
+            let topIdx = -1, minY = 1.0;
+            for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                if (results.multiHandLandmarks[i][0].y < minY) {
+                    minY = results.multiHandLandmarks[i][0].y;
+                    topIdx = i;
+                }
+            }
+
+            if (topIdx !== -1) {
+                const lm = results.multiHandLandmarks[topIdx];
+                const label = results.multiHandedness[topIdx].label;
+                const isUp = lm[0].y > lm[9].y; // 手首が中指付け根より下
+
+                if (isUp) {
+                    drawSkeleton(lm);
+
+                    const size = Math.hypot(lm[0].x - lm[9].x, lm[0].y - lm[9].y);
+                    const thr = size * 0.12;
+
+                    // 指の状態計算
+                    const f1 = (label === 'Left' ? (lm[4].x - lm[3].x > thr * 0.4) : (lm[4].x - lm[3].x < -thr * 0.4)) ? 1 : 0;
+                    const f2 = (lm[6].y - lm[8].y > thr) ? 1 : 0;
+                    const f3 = (lm[10].y - lm[12].y > thr) ? 1 : 0;
+                    const f4 = (lm[14].y - lm[16].y > thr) ? 1 : 0;
+                    const f5 = (lm[18].y - lm[20].y > thr) ? 1 : 0;
+
+                    if (!gameStarted && lm[0].y < 0.4) startGameManual();
+
+                    if (gameStarted) {
+                        let dNum = -1;
+                        if (f1==0 && f2==1 && f3==0 && f4==0 && f5==0) dNum = 1;
+                        else if (f1==0 && f2==1 && f3==1 && f4==0 && f5==0) dNum = 2;
+                        else if (f1==0 && f2==1 && f3==1 && f4==1 && f5==0) dNum = 3;
+                        else if (f1==0 && f2==1 && f3==1 && f4==1 && f5==1) dNum = 4;
+                        else if (f1==1 && f2==1 && f3==1 && f4==1 && f5==1) dNum = 5;
+                        else if (f1==1 && f2==0 && f3==0 && f4==0 && f5==0) dNum = 6;
+                        else if (f1==1 && f2==1 && f3==0 && f4==0 && f5==0) dNum = 7;
+                        else if (f1==1 && f2==1 && f3==1 && f4==0 && f5==0) dNum = 8;
+                        else if (f1==0 && f2==0 && f3==1 && f4==1 && f5==1) dNum = 9;
+                        else if (f1==0 && f2==1 && f3==0 && f4==0 && f5==1) dNum = 10;
+
+                        if (dNum === currentTarget.number && label === currentTarget.hand) {
+                            const now = Date.now();
+                            if (now - lastCorrectTime > 600) {
+                                score++; scoreEl.innerText = score;
+                                beep(); lastCorrectTime = now;
+                                messageEl.innerText = "OK!";
+                                questionImageEl.style.borderColor = "#f00";
+                                setTimeout(() => { 
+                                    if(gameStarted) { messageEl.innerText = ""; questionImageEl.style.borderColor = "transparent"; }
+                                }, 300);
+                                nextQuestion();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 0, // Liteモデル（最速）
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+    hands.onResults(onResults);
+
+    // カメラ解像度を抑えて負荷を軽減
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 480, height: 640
+    });
+    camera.start();
+
+    window.addEventListener('resize', () => {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+    });
+</script>
+
+</body>
+</html>
